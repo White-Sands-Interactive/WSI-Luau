@@ -1,0 +1,115 @@
+# WSI-Luau
+
+White Sands agent player for Roblox. Your game describes an NPC in Luau: what it can see and what it can do. The White Sands platform runs the model and picks one action per turn. The model and its API keys stay on the platform, so the game only holds a platform key.
+
+It speaks protocol version 1, the same contract as the Node, Python, .NET and C++ SDKs. It connects to `wss://api.whitesandsint.com` with Roblox's built-in WebSocket client (`HttpService:CreateWebStreamClient`), so you don't need a bridge server.
+
+## Setup
+
+1. Turn on **File → Experience Settings → Security → Allow HTTP Requests**.
+2. Put the module in `ServerScriptService` as a ModuleScript named `WSI`, with `Json` as its child. You can copy `src/` in by hand, sync it with Rojo (`default.project.json`), or install it with Wally (`wally.toml`).
+3. Create a platform key in the White Sands web app. Store it where only the server can read it, such as a `StringValue` at `ServerStorage.WSIPlatformKey`.
+
+WSI runs on the server only. Requiring it from a LocalScript raises an error.
+
+> Roblox Secrets (`HttpService:GetSecret`) can't hold the key yet. A Secret can only go into HTTP headers and URLs, and the platform reads the key from the first WebSocket message. Anyone with edit access to the place can read a key stored in `ServerStorage`, so use one key per game and revoke it if it leaks.
+
+## Usage
+
+```lua
+local WSI = require(game.ServerScriptService.WSI)
+
+local client = WSI.new({ platformKey = game.ServerStorage.WSIPlatformKey.Value })
+
+local agent, err = client:start({
+	name = "Guide",
+	goal = "Greet players and answer their questions.",
+	see = function()
+		return { players = nearbyPlayers(), heard = recentChat() }
+	end,
+	actions = {
+		{
+			name = "say",
+			description = "Say one short line in a speech bubble.",
+			params = { { name = "text", type = "string" } },
+			run = function(text)
+				showBubble(text)
+				return { said = text }
+			end,
+		},
+		{
+			name = "walk_to",
+			description = "Walk to a place.",
+			params = { { name = "place", type = "string", enum = { "spawn", "shop" } } },
+			run = function(place)
+				walkTo(place)
+			end,
+		},
+	},
+})
+assert(agent, err)
+
+-- Yields until the platform has played one action.
+local result = agent:turn()
+-- { ok = true, action = "say", args = { text = "Hi!" }, result = { said = "Hi!" }, attempts = 1, usage = {...} }
+```
+
+### `see`
+
+`see` returns the NPC's view as a table. It must be JSON-safe. A `Vector3` becomes `{x, y, z}`, a `CFrame` becomes its position, and an `EnumItem` or `Instance` becomes its name. Keep the view small: it's sent to the model on every turn, so its size sets your token cost.
+
+The SDK adds a `done` list with the NPC's last 20 actions (`doneLimit` changes this, and `0` turns it off).
+
+### Actions
+
+| Field | |
+| --- | --- |
+| `name` | Tool name. `see` and `wait` are reserved. |
+| `description` | Tells the model when to use it. |
+| `params` | List of `{ name, type, description?, optional?, enum? }`. `type` is `string`, `number`, `integer` or `boolean`. |
+| `run` | Gets the arguments in `params` order, then the whole args table. Return a JSON-safe value, or nothing for `{ ok = true }`. |
+
+To reject an action, call `error("reason", 0)`. The platform shows the reason to the model, and the model gets one retry. Arguments are checked against `params` before `run` is called.
+
+Return from `run` quickly. While `run` is running the turn is still open, so start long behaviour (walking, following) and return. Report when it finishes on the next turn.
+
+### Turns
+
+The game decides when the NPC acts. The platform decides what it does.
+
+| Call | |
+| --- | --- |
+| `agent:turn(timeout?)` | Grants one turn and yields until it's played. Returns a result with `ok`, `action`, `args`, `result`, `error`, `attempts` and `usage`. It doesn't throw. A failed turn has `ok = false`. The timeout defaults to 60 seconds. |
+| `agent:requestTurn(callback?)` | Same, but returns at once. Returns `false` if a turn is already running. |
+| `agent:isBusy()` | `true` while a turn is running. |
+| `agent:subgoals()` | Subgoals the model added this session. |
+| `agent:on(fn)` | Events: `action`, `retry`, `subgoal` and `turnFailed`. Returns an unsubscribe function. |
+| `agent:stop()` | Ends the session. |
+
+Trigger turns from game events, such as a player chatting nearby, walking up, or a task finishing. Avoid triggering them on a timer. That way an idle server costs nothing.
+
+### Client
+
+| Option | Default | |
+| --- | --- | --- |
+| `platformKey` | required | `pk_...` from the web app. |
+| `platformUrl` | `wss://api.whitesandsint.com` | Point this at a self-hosted platform. |
+| `instructions` | SDK default | Replaces the base agent instructions. Per-NPC `instructions` are appended to it. |
+| `doneLimit` | `20` | Actions kept in each view's `done` list. |
+| `turnTimeout` | `60` | Seconds. |
+| `onEvent` | | Receives every agent's events, plus `disconnected`, `reconnected` and `connectionLost`. |
+| `debug` | `false` | Prints connection and turn details. |
+
+One client holds one connection for any number of NPCs. A dropped connection reconnects with backoff and resumes sessions within 30 seconds. The client closes itself on server shutdown.
+
+## Example
+
+`examples/Guide.server.luau` is a Guide NPC for a spawn area. It:
+
+- hears chat within 40 studs and greets players who walk up
+- replies in a filtered speech bubble
+- follows a player, stays put, walks to named places with pathfinding, and jumps
+
+It plays a turn only when something happens.
+
+Roblox requires text shown to players to be filtered. The example passes everything the NPC says through `TextService:FilterStringAsync`. Do the same in your own NPCs.

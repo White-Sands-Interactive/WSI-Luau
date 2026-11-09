@@ -1,0 +1,10 @@
+[package]
+name = "white-sands-interactive/wsi"
+version = "0.1.0"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "server"
+license = "MIT"
+description = "White Sands agent player for Roblox: AI-driven NPCs whose model runs on the White Sands platform."
+exclude = ["examples"]
+
+[dependencies]

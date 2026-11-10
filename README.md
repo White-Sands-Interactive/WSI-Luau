@@ -88,15 +88,17 @@ The game decides when the NPC acts. The platform decides what it does.
 
 ### Several characters on one key
 
-Roblox allows at most 4 WebSocket clients per game server, so don't create one client per NPC. Use one client and name each NPC's character from the web app with `player`. Each session then runs on that character's model and persona, and its usage is charged to that character:
+Roblox allows at most 4 WebSocket clients per game server, so don't create one client per NPC. Use one client, and give each NPC's session the **character ID** of its character with `playerId`. Copy the IDs from the Players page in the web app. Each session then runs on that character's model and persona, and its usage is charged to that character:
 
 ```lua
 local client = WSI.new({ platformKey = key })
-local bruno = client:start({ name = "Bruno", player = "Bruno", goal = "...", see = seeBruno, actions = brunoActions })
-local zora = client:start({ name = "Madame Zora", player = "Madame Zora", goal = "...", see = seeZora, actions = zoraActions })
+local bruno = client:start({ name = "Bruno", playerId = "3f6c2d1e-8b7a-4c5d-9e0f-1a2b3c4d5e6f", goal = "...", see = seeBruno, actions = brunoActions })
+local zora = client:start({ name = "Madame Zora", playerId = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d", goal = "...", see = seeZora, actions = zoraActions })
 ```
 
-The character must be on the same account as the key, and in the same game when the key's own character belongs to one. If the name doesn't match, `start` returns `nil` and an error that lists the names available.
+- The character must be on the same account as the key, and in the same game when the key's own character belongs to one.
+- The ID never changes, so renaming a character in the web app doesn't break the game.
+- If the ID doesn't match, `start` returns `nil` and an error that lists the characters this key can use, with their IDs.
 
 Trigger turns from game events, such as a player chatting nearby, walking up, or a task finishing. Avoid triggering them on a timer. That way an idle server costs nothing.
 

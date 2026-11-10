@@ -17,7 +17,7 @@ local Json = require(script.Json)
 
 local WSI = {}
 WSI.Json = Json
-WSI.SDK_VERSION = "0.1.0"
+WSI.SDK_VERSION = "0.2.0"
 WSI.PROTOCOL_VERSION = 1
 WSI.DEFAULT_URL = "wss://api.whitesandsint.com"
 
@@ -62,6 +62,9 @@ export type Action = {
 
 export type AgentDefinition = {
 	name: string,
+	-- Character to play, by its name in the web app. Lets one key and one
+	-- connection run several characters. Omit it to use the key's own character.
+	player: string?,
 	goal: string?,
 	instructions: string?,
 	see: () -> any,
@@ -191,6 +194,7 @@ end
 local function validateDefinition(def: AgentDefinition)
 	assert(type(def) == "table", "start: definition must be a table")
 	assert(type(def.name) == "string" and def.name ~= "", "start: name is required")
+	assert(def.player == nil or (type(def.player) == "string" and def.player ~= ""), "start: player must be a non-empty string")
 	assert(type(def.see) == "function", "start: see must be a function")
 	assert(type(def.actions) == "table" and #def.actions > 0, "start: actions must list at least one action")
 	local seen = {}
@@ -898,6 +902,7 @@ function Client.start(self: Client, def: AgentDefinition): (Agent?, string?)
 		sessionId = agent.sessionId,
 		sessionToken = agent._token,
 		name = def.name,
+		player = def.player,
 		tools = agent._tools,
 		instructions = instructions,
 		goal = def.goal,

@@ -86,6 +86,18 @@ The game decides when the NPC acts. The platform decides what it does.
 | `agent:on(fn)` | Events: `action`, `retry`, `subgoal` and `turnFailed`. Returns an unsubscribe function. |
 | `agent:stop()` | Ends the session. |
 
+### Several characters on one key
+
+Roblox allows at most 4 WebSocket clients per game server, so don't create one client per NPC. Use one client and name each NPC's character from the web app with `player`. Each session then runs on that character's model and persona, and its usage is charged to that character:
+
+```lua
+local client = WSI.new({ platformKey = key })
+local bruno = client:start({ name = "Bruno", player = "Bruno", goal = "...", see = seeBruno, actions = brunoActions })
+local zora = client:start({ name = "Madame Zora", player = "Madame Zora", goal = "...", see = seeZora, actions = zoraActions })
+```
+
+The character must be on the same account as the key, and in the same game when the key's own character belongs to one. If the name doesn't match, `start` returns `nil` and an error that lists the names available.
+
 Trigger turns from game events, such as a player chatting nearby, walking up, or a task finishing. Avoid triggering them on a timer. That way an idle server costs nothing.
 
 ### Client

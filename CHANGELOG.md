@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0
+
+- `client:start{}` takes an optional `playerId`: the character ID from the web app's Players page. One key and one connection can now run several characters, each on its own model and persona. Roblox allows at most 4 WebSocket clients per game server, so a game with more NPCs than that needs this. It needs a platform with WSI-211; an older platform ignores `playerId` and uses the key's own character.
+
 ## 0.1.0
 
 First release of the Roblox SDK. It speaks protocol version 1, like the Node, Python, .NET and C++ SDKs.

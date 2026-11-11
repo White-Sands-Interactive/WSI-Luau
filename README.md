@@ -48,6 +48,8 @@ local agent, err = client:start({
 	},
 })
 assert(agent, err)
+-- On failure start also returns a code: "AUTH" for a bad or revoked key,
+-- "PROTOCOL" for an unsupported version, nil for a network failure.
 
 -- Yields until the platform has played one action.
 local result = agent:turn()
@@ -83,8 +85,8 @@ The game decides when the NPC acts. The platform decides what it does.
 | `agent:requestTurn(callback?)` | Same, but returns at once. Returns `false` if a turn is already running. |
 | `agent:isBusy()` | `true` while a turn is running. |
 | `agent:subgoals()` | Subgoals the model added this session. |
-| `agent:on(fn)` | Events: `action`, `retry`, `subgoal` and `turnFailed`. Returns an unsubscribe function. |
-| `agent:stop()` | Ends the session. |
+| `agent:on(fn)` | Events: `action`, `retry`, `subgoal`, `turnFailed` and `sessionLost`. Returns an unsubscribe function. |
+| `agent:stop()` | Ends the session and yields until the platform confirms it. Returns `true`, or `false` and an error. |
 
 ### Several characters on one key
 
@@ -114,7 +116,18 @@ Trigger turns from game events, such as a player chatting nearby, walking up, or
 | `onEvent` | | Receives every agent's events, plus `disconnected`, `reconnected` and `connectionLost`. |
 | `debug` | `false` | Prints connection and turn details. |
 
-One client holds one connection for any number of NPCs. A dropped connection reconnects with backoff and resumes sessions within 30 seconds. The client closes itself on server shutdown.
+One client holds one connection for any number of NPCs. A dropped connection reconnects with backoff and resumes sessions within 30 seconds, then emits `reconnected`. A session the platform can't resume emits `sessionLost` and is ended, so its `turn()` fails at once. The client closes itself on server shutdown.
+
+`client:connect()` logs in without starting a session. `start()` calls it for you. It returns `ok, error, code`, with the same codes as `start`.
+
+## Contract test
+
+The platform's SDK contract scenario (`platform/contract/README.md` in the Platform repo) runs against this SDK in Platform CI. It runs under [Lune](https://github.com/lune-org/lune), with a small stand-in for the Roblox APIs the SDK uses. To run it locally against a checkout of this repo:
+
+```bash
+DATABASE_URL=postgres://... WSI_LUAU_SRC=$PWD \
+  path/to/Platform/platform/contract/run.sh -- path/to/Platform/platform/e2e/luau/run.sh
+```
 
 ## Example
 

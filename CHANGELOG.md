@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+Fixes found by checking the SDK against the platform's contract scenario. The SDK now passes that scenario in Platform CI (`contract-luau`).
+
+- `client:connect()` and `client:start()` return the login failure code as a third value: `"AUTH"` for a bad or revoked key, `"PROTOCOL"` for an unsupported version, and `nil` for network failures. Before, a game couldn't tell a bad key from a network problem.
+- `agent:stop()` yields until the platform confirms with `session_stopped`, and returns `true`, or `false` and an error.
+- A session the platform can't resume after a reconnect now ends: it emits `sessionLost`, and `turn()` fails at once. Before, its next turn waited for the full timeout.
+
 ## 0.2.0
 
 - `client:start{}` takes an optional `playerId`: the character ID from the web app's Players page. One key and one connection can now run several characters, each on its own model and persona. Roblox allows at most 4 WebSocket clients per game server, so a game with more NPCs than that needs this. It needs a platform with WSI-211; an older platform ignores `playerId` and uses the key's own character.

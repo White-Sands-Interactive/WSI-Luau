@@ -17,7 +17,7 @@ local Json = require(script.Json)
 
 local WSI = {}
 WSI.Json = Json
-WSI.SDK_VERSION = "0.2.0"
+WSI.SDK_VERSION = "0.3.0"
 WSI.PROTOCOL_VERSION = 1
 WSI.DEFAULT_URL = "wss://api.whitesandsint.com"
 
@@ -235,6 +235,7 @@ export type Agent = typeof(setmetatable(
 		_turnWaiter: Waiter?,
 		_busy: boolean,
 		_stopped: boolean,
+		_stopError: string?,
 		_listeners: { (Event) -> () },
 	},
 	Agent
@@ -259,6 +260,7 @@ local function newAgent(client: any, def: AgentDefinition): Agent
 		_turnWaiter = nil,
 		_busy = false,
 		_stopped = false,
+		_stopError = nil,
 		_listeners = {},
 	}, Agent)
 end
@@ -424,7 +426,7 @@ end
 --- Returns a TurnResult. A failed turn returns ok = false with error set; it does not throw.
 function Agent.turn(self: Agent, timeout: number?): TurnResult
 	if self._stopped then
-		return { ok = false, error = "session stopped", attempts = 0 }
+		return { ok = false, error = self._stopError or "session stopped", attempts = 0 }
 	end
 	if self._busy then
 		return { ok = false, error = "a turn is already in progress for this agent", attempts = 0 }
@@ -480,7 +482,7 @@ function Agent.subgoals(self: Agent): { { id: string, objective: string, progres
 	return table.clone(self._subgoals)
 end
 
---- Listen for action, retry, subgoal and turnFailed events. Returns a function that unsubscribes.
+--- Listen for action, retry, subgoal, turnFailed and sessionLost events. Returns a function that unsubscribes.
 function Agent.on(self: Agent, listener: (Event) -> ()): () -> ()
 	table.insert(self._listeners, listener)
 	return function()
@@ -491,16 +493,23 @@ function Agent.on(self: Agent, listener: (Event) -> ()): () -> ()
 	end
 end
 
---- End the session. Safe to call twice.
-function Agent.stop(self: Agent)
+--- End the session. Yields until the platform confirms it with session_stopped.
+--- Returns true, or false and an error. Safe to call twice.
+function Agent.stop(self: Agent): (boolean, string?)
 	if self._stopped then
-		return
+		return true, nil
 	end
+	self:_end(nil)
+	return self._client:_stopSession(self)
+end
+
+-- Mark the session ended and release anything waiting on it.
+function Agent._end(self: Agent, reason: string?)
 	self._stopped = true
-	settle(self._waitWaiter, false, "session stopped")
+	self._stopError = reason
+	settle(self._waitWaiter, false, reason or "session stopped")
 	self._waitWaiter = nil
-	self:_completeTurn({ ok = false, error = "session stopped" })
-	self._client:_stopSession(self)
+	self:_completeTurn({ ok = false, error = reason or "session stopped" })
 end
 
 ----------------------------------------------------------------------------
@@ -533,6 +542,7 @@ export type Client = typeof(setmetatable(
 		_outbox: { any },
 		_pendingPong: string?,
 		_heartbeat: thread?,
+		_lastErrorCode: string?,
 	},
 	Client
 ))
@@ -565,6 +575,7 @@ function WSI.new(options: ClientOptions): Client
 		_outbox = {},
 		_pendingPong = nil,
 		_heartbeat = nil,
+		_lastErrorCode = nil,
 	}, Client)
 	game:BindToClose(function()
 		self:close()
@@ -615,7 +626,9 @@ function Client._failAll(self: Client, message: string)
 end
 
 -- Open a socket and send hello. Yields until hello_ok or failure.
+-- A hello_err code (AUTH, PROTOCOL) is kept in _lastErrorCode.
 function Client._openSocket(self: Client): (boolean, string?)
+	self._lastErrorCode = nil
 	local created, socket = pcall(function()
 		return HttpService:CreateWebStreamClient(Enum.WebStreamClientType.WebSocket, { Url = self._url })
 	end)
@@ -646,6 +659,7 @@ function Client._openSocket(self: Client): (boolean, string?)
 		if not helloDone and (envelope.type == "hello_ok" or envelope.type == "hello_err") then
 			helloDone = true
 			if envelope.type == "hello_err" then
+				self._lastErrorCode = if type(envelope.code) == "string" then envelope.code else nil
 				if envelope.code == "AUTH" or envelope.code == "PROTOCOL" then
 					self._closed = true
 				end
@@ -703,18 +717,22 @@ function Client._openSocket(self: Client): (boolean, string?)
 	return true, nil
 end
 
---- Connect and log in. start() calls this for you. Returns ok, error.
-function Client.connect(self: Client): (boolean, string?)
+--- Connect and log in. start() calls this for you.
+--- Returns ok, error and code. code is the platform's reason for refusing the
+--- login: "AUTH" for a bad or revoked key, "PROTOCOL" for an unsupported
+--- version. It is nil for network failures.
+function Client.connect(self: Client): (boolean, string?, string?)
 	if self._closed then
-		return false, "client is closed"
+		return false, "client is closed", self._lastErrorCode
 	end
 	if self._open then
-		return true, nil
+		return true, nil, nil
 	end
 	if self._connecting then
 		local waiter = newWaiter()
 		table.insert(self._connectWaiters, waiter)
-		return await(waiter)
+		local ok, err = await(waiter)
+		return ok, err, if ok then nil else self._lastErrorCode
 	end
 	self._connecting = true
 	local ok, err = self:_openSocket()
@@ -728,7 +746,7 @@ function Client.connect(self: Client): (boolean, string?)
 	for _, waiter in waiters do
 		settle(waiter, ok, err)
 	end
-	return ok, err
+	return ok, err, if ok then nil else self._lastErrorCode
 end
 
 function Client._startHeartbeat(self: Client)
@@ -792,15 +810,26 @@ function Client._scheduleReconnect(self: Client)
 			return
 		end
 		self._reconnectAttempt = 0
+		local agents = {}
 		for _, agent in self._sessions do
+			table.insert(agents, agent)
+		end
+		for _, agent in agents do
 			local resumed, resumeErr = self:_request(agent.sessionId, "resume", {
 				type = "resume_session",
 				sessionId = agent.sessionId,
 				sessionToken = agent._token,
 			})
 			if not resumed then
+				-- The platform no longer has this session. End it here too, so
+				-- turn() fails at once instead of waiting for a turn that never comes.
+				local reason = "session lost: " .. tostring(resumeErr)
 				warn("[WSI] could not resume " .. agent.name .. ": " .. tostring(resumeErr))
-				agent:_completeTurn({ ok = false, error = "connection lost" })
+				if self._sessions[agent.sessionId] == agent then
+					self._sessions[agent.sessionId] = nil
+				end
+				agent:_end(reason)
+				agent:_emit({ type = "sessionLost", sessionId = agent.sessionId, error = reason })
 			end
 		end
 		self:_emit({ type = "reconnected" })
@@ -884,12 +913,12 @@ function Client._handle(self: Client, envelope: { [string]: any })
 end
 
 --- Start an agent session. Yields until the platform accepts it.
---- Returns the Agent, or nil and an error message.
-function Client.start(self: Client, def: AgentDefinition): (Agent?, string?)
+--- Returns the Agent, or nil, an error message and the login code from connect().
+function Client.start(self: Client, def: AgentDefinition): (Agent?, string?, string?)
 	validateDefinition(def)
-	local connected, connectErr = self:connect()
+	local connected, connectErr, code = self:connect()
 	if not connected then
-		return nil, connectErr
+		return nil, connectErr, code
 	end
 	local agent = newAgent(self, def)
 	self._sessions[agent.sessionId] = agent
@@ -916,14 +945,16 @@ function Client.start(self: Client, def: AgentDefinition): (Agent?, string?)
 	return agent, nil
 end
 
-function Client._stopSession(self: Client, agent: Agent)
+function Client._stopSession(self: Client, agent: Agent): (boolean, string?)
 	if self._sessions[agent.sessionId] ~= agent then
-		return
+		return true, nil
 	end
 	self._sessions[agent.sessionId] = nil
-	if self._open then
-		self:_request(agent.sessionId, "stop", { type = "stop_session", sessionId = agent.sessionId })
+	if not self._open then
+		return false, "not connected to the platform"
 	end
+	local ok, err = self:_request(agent.sessionId, "stop", { type = "stop_session", sessionId = agent.sessionId })
+	return ok, if ok then nil else tostring(err)
 end
 
 --- Listen for events from every agent, plus disconnected, reconnected and connectionLost.

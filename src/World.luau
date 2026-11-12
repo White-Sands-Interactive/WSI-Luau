@@ -80,6 +80,9 @@ export type Options = {
 	-- Idle turns are this many times rarer when no human is within activeRadius. Defaults 3 and 120.
 	farSlowdown: number?,
 	activeRadius: number?,
+	-- A character with no human within activeRadius waits this long before a
+	-- turn for something it did itself (arrived, finished). Default 20. 0 turns it off.
+	farDelay: number?,
 	-- A human who comes this close is noticed. Default 12. 0 turns it off.
 	greetDistance: number?,
 	-- Cap on turns per minute for the whole world. Default 30.
@@ -113,6 +116,7 @@ function World.new(client: any, options: Options)
 		activeRadius = options.activeRadius or 120,
 		greetDistance = if options.greetDistance == nil then 12 else options.greetDistance,
 		turnsPerMinute = options.turnsPerMinute or 30,
+		farDelay = options.farDelay or 20,
 		chatReplies = options.chatReplies or 2,
 		chatPause = options.chatPause or 90,
 		maxActions = options.maxActions or 3,
@@ -249,6 +253,7 @@ function World:guide(character: any): string
 		"- go_to, approach and use take time. You are told when they finish. Do not repeat them while they are under way.",
 		"- use walks you to the thing by itself. To give something to someone who is not next to you, call approach and stop there; give it on your next turn, once you have arrived.",
 		"- A chat between neighbours is a few lines, then you both get on with your day. Do not answer a goodbye or a line that needs no answer.",
+		"- If someone does not answer you, leave them be and get on with your day. Do not keep talking to a person who stays silent.",
 		"- When someone speaks to you, answer them. When nothing needs doing, carry on with your day the way your story says, or call idle.",
 		"- Do not repeat yourself. Check your recent events before you speak.",
 		"- People you do not know are strangers. Treat people the way you feel about them.",
@@ -393,7 +398,14 @@ function Character:notice(text: string, options: { about: string?, turn: boolean
 	if options.urgent then
 		self:_wakeIn(0.2)
 	elseif options.turn then
-		self:_wakeIn(2.5)
+		-- Nobody is watching a character far from every human, so its
+		-- follow-up turns (arrived, finished an activity) can wait.
+		local world = self.world
+		if world.farDelay > 0 and not world:_humanNear(self:position(), world.activeRadius) then
+			self:_wakeIn(world.farDelay)
+		else
+			self:_wakeIn(2.5)
+		end
 	end
 end
 

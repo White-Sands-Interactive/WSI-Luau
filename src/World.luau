@@ -84,6 +84,10 @@ export type Options = {
 	greetDistance: number?,
 	-- Cap on turns per minute for the whole world. Default 30.
 	turnsPerMinute: number?,
+	-- In a chat between two characters, each replies at most chatReplies times
+	-- per chatPause seconds. Humans are always answered. Defaults 2 and 90.
+	chatReplies: number?,
+	chatPause: number?,
 	-- Actions per turn, 1 to 4. Default 3.
 	maxActions: number?,
 	-- Needs every character has, such as { food = { perMinute = 3 } }. 100 is
@@ -109,6 +113,8 @@ function World.new(client: any, options: Options)
 		activeRadius = options.activeRadius or 120,
 		greetDistance = if options.greetDistance == nil then 12 else options.greetDistance,
 		turnsPerMinute = options.turnsPerMinute or 30,
+		chatReplies = options.chatReplies or 2,
+		chatPause = options.chatPause or 90,
 		maxActions = options.maxActions or 3,
 		needDefs = options.needs or {},
 		memory = options.memory ~= false,
@@ -241,6 +247,8 @@ function World:guide(character: any): string
 		"- Each turn shows why you are acting now, who is near you, and what you can use where you are.",
 		"- You can speak and then act in the same turn, for example say and then go_to. When you agree to do something, do it in that same turn: say yes, then go_to or use.",
 		"- go_to, approach and use take time. You are told when they finish. Do not repeat them while they are under way.",
+		"- use walks you to the thing by itself. To give something to someone who is not next to you, call approach and stop there; give it on your next turn, once you have arrived.",
+		"- A chat between neighbours is a few lines, then you both get on with your day. Do not answer a goodbye or a line that needs no answer.",
 		"- When someone speaks to you, answer them. When nothing needs doing, carry on with your day the way your story says, or call idle.",
 		"- Do not repeat yourself. Check your recent events before you speak.",
 		"- People you do not know are strangers. Treat people the way you feel about them.",
@@ -385,7 +393,7 @@ function Character:notice(text: string, options: { about: string?, turn: boolean
 	if options.urgent then
 		self:_wakeIn(0.2)
 	elseif options.turn then
-		self:_wakeIn(1.5)
+		self:_wakeIn(2.5)
 	end
 end
 
@@ -808,17 +816,18 @@ function World:_speech(speaker: string, text: string, to: string?): number
 				local chat = other._chat
 				if os.clock() > chat.resetAt then
 					chat.count = 0
+					chat.resetAt = os.clock() + self.chatPause
 				end
 				chat.count += 1
-				chat.resetAt = os.clock() + 75
-				if chat.count > 4 then
+				if chat.count > self.chatReplies then
 					turn = false
 				end
 			end
 			if addressed and other.body.face and not other.status then
 				pcall(other.body.face, other.body, from)
 			end
-			other:notice(line, { about = speaker, urgent = turn })
+			-- A human gets an answer at once; a neighbour waits a breath.
+			other:notice(line, { about = speaker, urgent = turn and not speakerIsCharacter, turn = turn })
 		end
 	end
 	self:_emit({ type = "speech", speaker = speaker, text = text, to = to })

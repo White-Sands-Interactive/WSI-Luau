@@ -239,7 +239,7 @@ function World:guide(character: any): string
 		"How you act:",
 		"- You act only through tools. To speak, call say. Keep a line to one or two short sentences, the way people talk.",
 		"- Each turn shows why you are acting now, who is near you, and what you can use where you are.",
-		"- You can speak and then act in the same turn, for example say and then go_to.",
+		"- You can speak and then act in the same turn, for example say and then go_to. When you agree to do something, do it in that same turn: say yes, then go_to or use.",
 		"- go_to, approach and use take time. You are told when they finish. Do not repeat them while they are under way.",
 		"- When someone speaks to you, answer them. When nothing needs doing, carry on with your day the way your story says, or call idle.",
 		"- Do not repeat yourself. Check your recent events before you speak.",
@@ -320,6 +320,8 @@ function World:addCharacter(def: {
 		instructions = instructions,
 		memory = self.memory,
 		maxActions = self.maxActions,
+		subgoals = false,
+		ownInstructions = true,
 		see = function()
 			return character:_view()
 		end,

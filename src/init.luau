@@ -75,6 +75,10 @@ export type AgentDefinition = {
 	memory: boolean?,
 	-- How many actions one turn may play, 1 to 4. Defaults to 1.
 	maxActions: number?,
+	-- false takes the platform's subgoal tools away. Fewer model calls.
+	subgoals: boolean?,
+	-- true sends only this definition's instructions, without the client's base instructions.
+	ownInstructions: boolean?,
 }
 
 export type Relationship = { about: string, affinity: number, label: string, note: string? }
@@ -969,7 +973,9 @@ function Client.start(self: Client, def: AgentDefinition): (Agent?, string?, str
 	local agent = newAgent(self, def)
 	self._sessions[agent.sessionId] = agent
 	local instructions = self._instructions
-	if def.instructions and def.instructions ~= "" then
+	if def.ownInstructions then
+		instructions = def.instructions or ""
+	elseif def.instructions and def.instructions ~= "" then
 		instructions ..= "\n\n" .. def.instructions
 	end
 	local ok, err = self:_request(agent.sessionId, "start", {
@@ -983,6 +989,7 @@ function Client.start(self: Client, def: AgentDefinition): (Agent?, string?, str
 		goal = def.goal,
 		memory = def.memory == true or nil,
 		maxActions = def.maxActions,
+		subgoals = if def.subgoals == false then false else nil,
 	})
 	if not ok then
 		self._sessions[agent.sessionId] = nil

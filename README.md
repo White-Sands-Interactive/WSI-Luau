@@ -104,6 +104,36 @@ local zora = client:start({ name = "Madame Zora", playerId = "9a8b7c6d-5e4f-4a3b
 
 Trigger turns from game events, such as a player chatting nearby, walking up, or a task finishing. Avoid triggering them on a timer. That way an idle server costs nothing.
 
+### Memory, relationships, and several actions per turn
+
+```lua
+local agent = client:start({ name = "Mia", playerId = id, memory = true, maxActions = 3, see = see, actions = actions })
+agent:observe('Alex said to you: "Morning!"', "Alex") -- kept in memory, does not start a turn
+agent:relationships() -- { alex = { about = "Alex", affinity = 12, label = "acquaintance", note = "brought me coffee" } }
+```
+
+With `memory = true` the platform keeps what the character saw, did, and chose to remember, and how it feels about each person, between sessions and servers. `agent:on` also reports `memory` and `relationship` events. With `maxActions` above 1, a turn can play several actions (say, then walk); `result.steps` lists them.
+
+### WSI.World
+
+`WSI.World` builds a living world on top of this, so a game does not write a view or actions per character. Describe places, things with activities, and characters; World works out what each character sees, gives it `say`, `go_to`, `approach`, `use`, `give`, `emote` and `idle`, carries speech between characters and players, and decides when a character needs a turn. `WSI.RobloxBody` is a ready body: an R15 rig with pathfinding, emotes, a filtered speech bubble, and a status line.
+
+```lua
+local world = WSI.World.new(client, { name = "Sandy Shores", about = "A small beach town.", needs = { food = { perMinute = 2 } } })
+world:addPlace("cafe", { description = "Mia's cafe", position = Vector3.new(60, 0, 0) })
+world:addThing("espresso_machine", { place = "cafe", position = Vector3.new(64, 0, -4), activities = {
+	make_coffee = { description = "Make a coffee", seconds = 6, gives = "coffee" },
+} })
+world:addCharacter({ id = miaCharacterId, name = "Mia", home = "cafe", body = WSI.RobloxBody.new({ name = "Mia", position = Vector3.new(60, 0, 4) }) })
+world:addPerson({ name = player.DisplayName, getPosition = function() return rootPosition(player) end })
+world:on(function(event) --[[ speech, relationship, status, give, thinking, turn ]] end)
+world:start()
+
+player.Chatted:Connect(function(message) world:say(player.DisplayName, message) end)
+```
+
+Who each character is comes from its story in the web app. `src/World.luau` documents the options, and `tests/World.spec.luau` runs it under Lune.
+
 ### Client
 
 | Option | Default | |

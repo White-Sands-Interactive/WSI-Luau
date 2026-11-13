@@ -17,7 +17,7 @@ local Json = require(script.Json)
 
 local WSI = {}
 WSI.Json = Json
-WSI.SDK_VERSION = "0.3.0"
+WSI.SDK_VERSION = "0.4.0"
 WSI.PROTOCOL_VERSION = 1
 WSI.DEFAULT_URL = "wss://api.whitesandsint.com"
 
@@ -69,7 +69,19 @@ export type AgentDefinition = {
 	instructions: string?,
 	see: () -> any,
 	actions: { Action },
+	-- Turn on the character's long-term memory and relationships. They are kept
+	-- on the platform between sessions and servers. The view's done list is
+	-- left out, because the platform remembers what the character did.
+	memory: boolean?,
+	-- How many actions one turn may play, 1 to 4. Defaults to 1.
+	maxActions: number?,
+	-- false takes the platform's subgoal tools away. Fewer model calls.
+	subgoals: boolean?,
+	-- true sends only this definition's instructions, without the client's base instructions.
+	ownInstructions: boolean?,
 }
+
+export type Relationship = { about: string, affinity: number, label: string, note: string? }
 
 export type TurnResult = {
 	ok: boolean,
@@ -79,6 +91,8 @@ export type TurnResult = {
 	error: string?,
 	attempts: number,
 	usage: { promptTokens: number, completionTokens: number }?,
+	-- Every action played, when the turn played more than one.
+	steps: { { action: string, args: { [string]: any }, result: any, error: string? } }?,
 }
 
 export type Event = {
@@ -255,6 +269,7 @@ local function newAgent(client: any, def: AgentDefinition): Agent
 		_tools = tools,
 		_done = {},
 		_subgoals = {},
+		_relationships = {},
 		_released = false,
 		_waitWaiter = nil,
 		_turnWaiter = nil,
@@ -268,7 +283,7 @@ end
 function Agent._view(self: Agent): any
 	local view = self._def.see()
 	local limit = self._client._doneLimit
-	if limit <= 0 then
+	if limit <= 0 or self._def.memory then
 		return view
 	end
 	-- A dictionary view gets a done field. Anything else is wrapped.
@@ -454,7 +469,30 @@ function Agent.turn(self: Agent, timeout: number?): TurnResult
 		error = report.error,
 		attempts = report.attempts or 0,
 		usage = report.usage,
+		steps = report.steps,
 	}
+end
+
+--- Tell the character about something that happened, without starting a turn.
+--- It is kept in the character's memory and shown on its next turns.
+--- about names who it concerns. Needs memory = true on the definition.
+function Agent.observe(self: Agent, text: string, about: string?)
+	if self._stopped or not self._def.memory or text == "" then
+		return
+	end
+	pcall(self._client._send, self._client, { type = "observe", sessionId = self.sessionId, text = text, about = about })
+end
+
+--- How the character feels about each person it knows, by lower-case name.
+--- affinity runs from -100 to 100. 0 is a stranger.
+function Agent.relationships(self: Agent): { [string]: Relationship }
+	return table.clone(self._relationships)
+end
+
+function Agent._setRelationship(self: Agent, relationship: Relationship)
+	if type(relationship) == "table" and type(relationship.about) == "string" then
+		self._relationships[string.lower(relationship.about)] = relationship
+	end
 end
 
 --- Ask for a turn without yielding. Returns false if a turn is already running.
@@ -881,6 +919,13 @@ function Client._handle(self: Client, envelope: { [string]: any })
 		if agent then
 			if envelope.event == "subgoal" and not envelope.error then
 				agent:_applySubgoal(envelope.action, envelope.args)
+			elseif envelope.event == "relationship" and not envelope.error and type(envelope.args) == "table" then
+				agent:_setRelationship({
+					about = envelope.args.about,
+					affinity = envelope.args.affinity,
+					label = envelope.args.label,
+					note = envelope.args.because,
+				})
 			end
 			agent:_emit({
 				type = envelope.event,
@@ -897,6 +942,11 @@ function Client._handle(self: Client, envelope: { [string]: any })
 	elseif kind == "ping" then
 		pcall(self._send, self, { type = "pong", id = envelope.id })
 	elseif kind == "session_started" then
+		if agent and type(envelope.relationships) == "table" then
+			for _, relationship in envelope.relationships do
+				agent:_setRelationship(relationship)
+			end
+		end
 		self:_reply(envelope.sessionId, "start", true, nil)
 	elseif kind == "session_stopped" then
 		self:_reply(envelope.sessionId, "stop", true, nil)
@@ -923,7 +973,9 @@ function Client.start(self: Client, def: AgentDefinition): (Agent?, string?, str
 	local agent = newAgent(self, def)
 	self._sessions[agent.sessionId] = agent
 	local instructions = self._instructions
-	if def.instructions and def.instructions ~= "" then
+	if def.ownInstructions then
+		instructions = def.instructions or ""
+	elseif def.instructions and def.instructions ~= "" then
 		instructions ..= "\n\n" .. def.instructions
 	end
 	local ok, err = self:_request(agent.sessionId, "start", {
@@ -935,6 +987,9 @@ function Client.start(self: Client, def: AgentDefinition): (Agent?, string?, str
 		tools = agent._tools,
 		instructions = instructions,
 		goal = def.goal,
+		memory = def.memory == true or nil,
+		maxActions = def.maxActions,
+		subgoals = if def.subgoals == false then false else nil,
 	})
 	if not ok then
 		self._sessions[agent.sessionId] = nil
@@ -988,5 +1043,8 @@ function Client.close(self: Client)
 		end)
 	end
 end
+
+WSI.World = require(script.World)
+WSI.RobloxBody = require(script.RobloxBody)
 
 return WSI

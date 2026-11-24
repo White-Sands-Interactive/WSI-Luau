@@ -116,7 +116,7 @@ With `memory = true` the platform keeps what the character saw, did, and chose t
 
 ### WSI.World
 
-`WSI.World` builds a living world on top of this, so a game does not write a view or actions per character. Describe places, things with activities, and characters; World works out what each character sees, gives it `say`, `go_to`, `approach`, `use`, `give`, `emote` and `idle`, carries speech between characters and players, and decides when a character needs a turn. `WSI.RobloxBody` is a ready body: an R15 rig with pathfinding, emotes, a filtered speech bubble, and a status line.
+`WSI.World` builds a living world on top of this, so a game does not write a view or actions per character. Describe places, things with activities, and characters; World works out what each character sees, gives it `say`, `go_to`, `approach`, `use`, `give`, `join`, `follow`, `invite`, `emote` and `idle`, carries speech between characters and players, and decides when a character needs a turn. `WSI.RobloxBody` is a ready body: an R15 rig with pathfinding, emotes, a filtered speech bubble, and a status line.
 
 ```lua
 local world = WSI.World.new(client, { name = "Sandy Shores", about = "A small beach town.", needs = { food = { perMinute = 2 } } })
@@ -132,7 +132,25 @@ world:start()
 player.Chatted:Connect(function(message) world:say(player.DisplayName, message) end)
 ```
 
-Who each character is comes from its story in the web app. `src/World.luau` documents the options, and `tests/World.spec.luau` runs it under Lune.
+#### Doing things together
+
+Mark an activity `shared = true` and several people can do it at once. Tell World when a player starts or stops one, and a character doing the same thing is told they are doing it together:
+
+```lua
+world:addThing("boombox", { place = "plaza", position = pos, activities = {
+	dance = { description = "Dance to the music", seconds = 20, status = "dancing", emote = "dance", shared = true },
+} })
+world:personActivity(player.DisplayName, "boombox", "dance") -- the player started dancing
+world:personActivity(player.DisplayName, nil)                -- and stopped
+```
+
+Characters can `join` a player's shared activity, `invite` a player to one (they go and start it; the game gets an `invite` event to show the player), and `follow` a player around for `followSeconds`. A character and a player doing a shared activity at the same time emit `together { character, person, thing, activity }`, which is the moment to reward in your game. `give` walks over to the person by itself.
+
+#### Reliability and cost
+
+A failed turn is retried after `retrySeconds` (3), then three times slower each time it fails again, up to `idleSeconds`. With `pauseWhenEmpty` (default on) a world with no players takes no turns, so an empty server costs nothing. `RobloxBody` jumps when stuck on a prop, and when a walk ends far from its goal it moves the character there (`teleportWhenStuck`, default on).
+
+Who each character is comes from its story in the web app. `src/World.luau` documents the options, and `tests/World.spec.luau` and `tests/Together.spec.luau` run it under Lune.
 
 ### Client
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0
+
+Doing things together, and fewer ways for a character to get stuck. Everything is in `WSI.World` and `WSI.RobloxBody`; the client and protocol are unchanged.
+
+- **Shared activities:** an activity with `shared = true` can be done by several people at once. `world:personActivity(name, thing, activity)` tells World what a player is doing; nearby characters see it, and a character doing the same shared activity is told they are doing it together. World emits `together { character, person, thing, activity }`.
+- **New actions:** `join` (do the shared activity a player is doing), `invite` (go and start a shared activity and invite a player; World emits `invite { from, to, thing, activity, place }`), and `follow` (walk with someone for `followSeconds`, default 120; emits `follow { character, person, on }`).
+- `give` walks over to the person by itself, so it no longer takes two turns.
+- A failed turn is retried after `retrySeconds` (default 3), backing off three times each time it fails again, up to `idleSeconds`. Before, it waited at least 20 seconds.
+- `pauseWhenEmpty` (default on): no turns while no player is in the world.
+- The guide tells characters how to do things together and when to invite.
+- `RobloxBody`: an emote with seconds loops for that long (an activity), `walkToward` for smooth short walks, a jump when stuck on a prop, and `teleportWhenStuck` (default on) when a walk ends far from its goal.
+- `tests/Together.spec.luau` covers all of it under Lune.
+
 ## 0.3.0
 
 Fixes found by checking the SDK against the platform's contract scenario. The SDK now passes that scenario in Platform CI (`contract-luau`).

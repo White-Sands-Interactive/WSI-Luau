@@ -33,6 +33,8 @@ export type Options = {
 	colors: { skin: Color3?, shirt: Color3?, pants: Color3? }?,
 	parent: Instance?,
 	walkSpeed: number?,
+	-- When a walk ends far from its goal, move the character there. Default true.
+	teleportWhenStuck: boolean?,
 }
 
 local function buildModel(options: Options): Model
@@ -96,6 +98,7 @@ function RobloxBody.new(options: Options)
 		root = root,
 		head = head,
 		walking = false,
+		teleportWhenStuck = options.teleportWhenStuck ~= false,
 		emotes = { "wave", "laugh", "cheer", "dance", "point" },
 		_walkToken = 0,
 		_bubbleToken = 0,
@@ -268,22 +271,40 @@ function RobloxBody:setThinking(on: boolean)
 	end
 end
 
-function RobloxBody:emote(name: string)
+--- Play an emote. With seconds, it loops for that long (an activity such as
+--- dancing); without, it plays once.
+function RobloxBody:emote(name: string, seconds: number?)
 	local track = self:_track(name)
 	if not track then
 		return
 	end
-	track.Looped = false
+	self._emoteToken = (self._emoteToken or 0) + 1
+	local token = self._emoteToken
+	track.Looped = seconds ~= nil
 	track:Play(0.2)
-	task.delay(3, function()
-		track:Stop(0.3)
+	task.delay(seconds or 3, function()
+		if self._emoteToken == token then
+			track:Stop(0.3)
+		end
 	end)
+	self._emoteTrack = track
 end
 
 function RobloxBody:stop()
 	self._walkToken += 1
 	self.walking = false
+	if self._emoteTrack and self._emoteTrack.Looped then
+		self._emoteToken = (self._emoteToken or 0) + 1
+		self._emoteTrack:Stop(0.3)
+	end
 	self.humanoid:MoveTo(self.root.Position)
+end
+
+--- Take a step towards a position without pathfinding. Returns at once.
+--- World's follow uses it for short distances so the walk looks smooth.
+function RobloxBody:walkToward(position: Vector3)
+	self._walkToken += 1
+	self.humanoid:MoveTo(position)
 end
 
 -- A goal's center is often inside a prop. Try it, then spots around it.
@@ -334,8 +355,21 @@ function RobloxBody:moveTo(goal: Vector3): boolean
 			arrived = true
 		end)
 		local started = os.clock()
+		local lastPosition, lastMoved = self.root.Position, os.clock()
+		local jumped = false
 		while not arrived and os.clock() - started < 6 and self._walkToken == token do
 			task.wait(0.1)
+			-- Stuck on a prop: jump once, then give up on this waypoint.
+			if (self.root.Position - lastPosition).Magnitude > 0.5 then
+				lastPosition, lastMoved = self.root.Position, os.clock()
+			elseif os.clock() - lastMoved > 1.2 then
+				if jumped then
+					break
+				end
+				self.humanoid.Jump = true
+				jumped = true
+				lastMoved = os.clock()
+			end
 		end
 		connection:Disconnect()
 	end
@@ -344,7 +378,17 @@ function RobloxBody:moveTo(goal: Vector3): boolean
 	end
 	self.walking = false
 	local flat = Vector3.new(target.X, self.root.Position.Y, target.Z)
-	return (flat - self.root.Position).Magnitude < 9
+	if (flat - self.root.Position).Magnitude < 9 then
+		return true
+	end
+	-- Still far away after walking the path: rather than leave a character
+	-- stuck behind a wall, put it at the goal.
+	if self.teleportWhenStuck then
+		local standHeight = self.humanoid.HipHeight + self.root.Size.Y / 2
+		self.model:PivotTo(CFrame.new(Vector3.new(target.X, target.Y + standHeight, target.Z)) * self.root.CFrame.Rotation)
+		return true
+	end
+	return false
 end
 
 function RobloxBody:destroy()

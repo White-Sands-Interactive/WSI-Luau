@@ -17,7 +17,7 @@ local Json = require(script.Json)
 
 local WSI = {}
 WSI.Json = Json
-WSI.SDK_VERSION = "0.4.0"
+WSI.SDK_VERSION = "0.5.0"
 WSI.PROTOCOL_VERSION = 1
 WSI.DEFAULT_URL = "wss://api.whitesandsint.com"
 

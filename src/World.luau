@@ -254,8 +254,9 @@ function World:personActivity(name: string, thingId: string?, activityName: stri
 		local d = character and at and distance(character:position(), at)
 		local same = character and character._doing and character._doing.thing == thingId and character._doing.activity == activityName
 		if character and not same and d and d <= self.hearing then
-			-- Seen, not a reason to interrupt: it goes in the next view.
-			character:notice(name .. " started " .. doing .. " at the " .. thing.name .. ".", { about = name })
+			-- A free character gets a turn, so it can join in; a busy one sees
+			-- it in its next view.
+			character:notice(name .. " started " .. doing .. " at the " .. thing.name .. ".", { about = name, turn = not character.status })
 		end
 	end
 	self:_checkTogether(thing)

@@ -62,6 +62,10 @@ export type Activity = {
 	emote: string?,
 	-- Called when it finishes, with the character and the thing.
 	done: ((any, any) -> ())?,
+	-- Several people can do it at the same time, and doing it at the same
+	-- time as someone else is noticed as doing it together (dance, fish,
+	-- drink a coffee). Default false: one user at a time.
+	shared: boolean?,
 }
 
 export type Options = {
@@ -98,6 +102,14 @@ export type Options = {
 	needs: { [string]: { perMinute: number, start: number? } }?,
 	-- Keep memory and relationships on the platform. Default true.
 	memory: boolean?,
+	-- No turns at all while no human is in the world, so an empty server
+	-- spends nothing. Default true.
+	pauseWhenEmpty: boolean?,
+	-- After a failed turn, wait this long before the next try; each further
+	-- failure in a row waits three times longer, up to idleSeconds. Default 3.
+	retrySeconds: number?,
+	-- How long follow keeps walking with someone. Default 120.
+	followSeconds: number?,
 }
 
 function World.new(client: any, options: Options)
@@ -122,6 +134,9 @@ function World.new(client: any, options: Options)
 		maxActions = options.maxActions or 3,
 		needDefs = options.needs or {},
 		memory = options.memory ~= false,
+		pauseWhenEmpty = options.pauseWhenEmpty ~= false,
+		retrySeconds = options.retrySeconds or 3,
+		followSeconds = options.followSeconds or 120,
 		places = {},
 		placeOrder = {},
 		things = {},
@@ -142,7 +157,12 @@ end
 --- speech { speaker, text, to }, status { character, status },
 --- relationship { character, about, affinity, label, change, because },
 --- memory { character, about, note }, action { character, action, args },
---- thinking { character, on }, give { from, to, item }, turn { character, result }.
+--- thinking { character, on }, give { from, to, item }, turn { character, result },
+--- together { character, person, thing, activity } when a character and a
+--- player do a shared activity at the same time, invite { from, to, thing,
+--- activity, place } when a character invites a player to do something,
+--- follow { character, person, on } when a character starts or stops
+--- walking with someone.
 function World:on(listener: (any) -> ()): () -> ()
 	table.insert(self._listeners, listener)
 	return function()
@@ -185,7 +205,85 @@ function World:addPerson(person: { name: string, getPosition: () -> any, ref: an
 end
 
 function World:removePerson(name: string)
+	local person = self.people[name]
+	if person and person.doing then
+		self:personActivity(name, nil)
+	end
 	self.people[name] = nil
+end
+
+local function activityText(thing: any, activityName: string): string
+	local activity = thing.activities[activityName]
+	return (activity and activity.status) or string.gsub(activityName, "_", " ")
+end
+
+--- A human player started (thingId, activityName) or stopped (nil) doing an
+--- activity of a thing. Characters near them notice, and a character doing
+--- the same shared activity is told they are doing it together.
+function World:personActivity(name: string, thingId: string?, activityName: string?)
+	local person = self.people[name]
+	if not person then
+		return
+	end
+	local previous = person.doing
+	if previous and previous.thing == thingId and previous.activity == activityName then
+		return
+	end
+	if previous then
+		person.doing = nil
+		local thing = self.things[previous.thing]
+		if thing and thing._together then
+			for key in table.clone(thing._together) do
+				if string.find(key, "\0" .. name, 1, true) then
+					thing._together[key] = nil
+				end
+			end
+		end
+	end
+	if not thingId then
+		return
+	end
+	local thing = self.things[thingId]
+	assert(thing, "personActivity: no such thing " .. tostring(thingId))
+	assert(thing.activities[activityName], "personActivity: " .. thingId .. " has no activity " .. tostring(activityName))
+	person.doing = { thing = thingId, activity = activityName, since = os.clock() }
+	local at = person.getPosition()
+	local doing = activityText(thing, activityName)
+	for _, characterName in self.characterOrder do
+		local character = self.characters[characterName]
+		local d = character and at and distance(character:position(), at)
+		local same = character and character._doing and character._doing.thing == thingId and character._doing.activity == activityName
+		if character and not same and d and d <= self.hearing then
+			-- Seen, not a reason to interrupt: it goes in the next view.
+			character:notice(name .. " started " .. doing .. " at the " .. thing.name .. ".", { about = name })
+		end
+	end
+	self:_checkTogether(thing)
+end
+
+-- A character and a person doing the same shared activity of a thing at the
+-- same time are doing it together. Each pair is told once per activity.
+function World:_checkTogether(thing: any)
+	thing._together = thing._together or {}
+	for _, characterName in self.characterOrder do
+		local character = self.characters[characterName]
+		local doing = character and character._doing
+		local activity = doing and doing.thing == thing.id and thing.activities[doing.activity]
+		if activity and activity.shared and doing.started then
+			for personName, person in self.people do
+				local other = person.doing
+				if other and other.thing == thing.id and other.activity == doing.activity then
+					local key = characterName .. "\0" .. personName
+					if not thing._together[key] then
+						thing._together[key] = true
+						local text = activityText(thing, doing.activity)
+						character:notice(string.format("You and %s are %s together at the %s.", personName, text, thing.name), { about = personName, turn = true })
+						self:_emit({ type = "together", character = characterName, person = personName, thing = thing.id, activity = doing.activity })
+					end
+				end
+			end
+		end
+	end
 end
 
 function World:placeAt(position: any): string?
@@ -251,7 +349,11 @@ function World:guide(character: any): string
 		"- Each turn shows why you are acting now, who is near you, and what you can use where you are.",
 		"- You can speak and then act in the same turn, for example say and then go_to. When you agree to do something, do it in that same turn: say yes, then go_to or use.",
 		"- go_to, approach and use take time. You are told when they finish. Do not repeat them while they are under way.",
-		"- use walks you to the thing by itself. To give something to someone who is not next to you, call approach and stop there; give it on your next turn, once you have arrived.",
+		"- use walks you to the thing by itself. give walks you over to the person by itself.",
+		"- Things marked shared can be done with other people at the same time. Doing them together is how friendships grow.",
+		"- To do something with someone: invite them (you go and start it, they can join you), join what they are already doing, or follow them to walk along with them.",
+		"- When you accept an invitation, say so, then do it in the same turn: use the thing they named, or follow them.",
+		"- When you like someone and you are both free, you may invite them to do something you enjoy. Do not invite the same person again if they did not come.",
 		"- A chat between neighbours is a few lines, then you both get on with your day. Do not answer a goodbye or a line that needs no answer.",
 		"- If someone does not answer you, leave them be and get on with your day. Do not keep talking to a person who stays silent.",
 		"- When someone speaks to you, answer them. When nothing needs doing, carry on with your day the way your story says, or call idle.",
@@ -313,6 +415,8 @@ function World:addCharacter(def: {
 		_greeted = {},
 		_chat = { count = 0, resetAt = 0 },
 		_using = nil,
+		_doing = nil,
+		_failures = 0,
 		turns = 0,
 		tokens = 0,
 	}, Character)
@@ -461,7 +565,12 @@ function Character:_view()
 		end
 	end
 	for name, person in world.people do
-		addNearby(name, "player", person.getPosition(), nil)
+		local doing = nil
+		if person.doing then
+			local thing = world.things[person.doing.thing]
+			doing = thing and (activityText(thing, person.doing.activity) .. " at the " .. thing.name) or nil
+		end
+		addNearby(name, "player", person.getPosition(), doing)
 	end
 	table.sort(nearby, function(a, b)
 		return a.steps_away < b.steps_away
@@ -480,6 +589,9 @@ function Character:_view()
 				local text = activityName .. ": " .. activity.description
 				if activity.needs then
 					text ..= " (needs " .. activity.needs .. ")"
+				end
+				if activity.shared then
+					text ..= " (shared)"
 				end
 				table.insert(activities, text)
 			end
@@ -521,11 +633,145 @@ end
 function Character:_interrupt(): number
 	self._task += 1
 	if self._using then
-		self._using.usedBy = nil
+		if self._using.usedBy == self.name then
+			self._using.usedBy = nil
+		end
 		self._using = nil
+	end
+	if self._doing then
+		self:_endDoing()
+	end
+	if self._following then
+		local person = self._following
+		self._following = nil
+		self.world:_emit({ type = "follow", character = self.name, person = person, on = false })
 	end
 	self.body:stop()
 	return self._task
+end
+
+function Character:_endDoing()
+	local doing = self._doing
+	self._doing = nil
+	local thing = doing and self.world.things[doing.thing]
+	if thing and thing._together then
+		for key in table.clone(thing._together) do
+			if string.sub(key, 1, #self.name + 1) == self.name .. "\0" then
+				thing._together[key] = nil
+			end
+		end
+	end
+end
+
+-- Who, among the humans, is doing the same activity of this thing right now.
+function Character:_companions(thingId: string, activityName: string): { string }
+	local names = {}
+	for name, person in self.world.people do
+		if person.doing and person.doing.thing == thingId and person.doing.activity == activityName then
+			table.insert(names, name)
+		end
+	end
+	table.sort(names)
+	return names
+end
+
+-- Walk to a thing and do one of its activities. Errors with a reason the
+-- model can read when it cannot start.
+function Character:_use(thingId: string, activityName: string)
+	local world = self.world
+	local thing = world.things[thingId]
+	if not thing then
+		error("there is no thing called " .. tostring(thingId), 0)
+	end
+	local activity = thing.activities[activityName]
+	if not activity then
+		local names = {}
+		for name in thing.activities do
+			table.insert(names, name)
+		end
+		table.sort(names)
+		error(thingId .. " has no activity " .. tostring(activityName) .. ". It has: " .. table.concat(names, ", "), 0)
+	end
+	if not activity.shared and thing.usedBy and thing.usedBy ~= self.name then
+		error(thing.usedBy .. " is using " .. thingId .. " right now", 0)
+	end
+	if activity.needs and not self:_has(activity.needs) then
+		error("you need " .. activity.needs .. " to do that", 0)
+	end
+	local token = self:_interrupt()
+	local seconds = activity.seconds or 5
+	if not activity.shared then
+		thing.usedBy = self.name
+	end
+	self._using = thing
+	self._doing = { thing = thingId, activity = activityName, started = false }
+	task.spawn(function()
+		if distance(thing.position, self:position()) > 6 then
+			if not self:_walk(token, thing.position, "walking to " .. thing.name) then
+				if self._task == token then
+					if thing.usedBy == self.name then
+						thing.usedBy = nil
+					end
+					self._using = nil
+					self:_endDoing()
+					self:notice("You could not reach " .. thingId .. ".", { turn = true })
+				end
+				return
+			end
+		end
+		if self._task ~= token then
+			return
+		end
+		if self.body.face then
+			pcall(self.body.face, self.body, thing.position)
+		end
+		self:setStatus(activity.status or string.gsub(activityName, "_", " "))
+		if activity.emote and self.body.emote then
+			pcall(self.body.emote, self.body, activity.emote, seconds)
+		end
+		self._doing.started = true
+		world:_checkTogether(thing)
+		task.wait(seconds)
+		if self._task ~= token then
+			return
+		end
+		local with = self:_companions(thingId, activityName)
+		if thing.usedBy == self.name then
+			thing.usedBy = nil
+		end
+		self._using = nil
+		self:_endDoing()
+		self:setStatus(nil)
+		local outcome = {}
+		if activity.needs then
+			local index = self:_has(activity.needs)
+			if index then
+				table.remove(self.carrying, index)
+			end
+		end
+		for need, change in activity.effects or {} do
+			if self.needs[need] then
+				self.needs[need] = math.clamp(self.needs[need] + change, 0, 100)
+				table.insert(outcome, need .. " is now " .. math.floor(self.needs[need]))
+			end
+		end
+		if activity.gives then
+			table.insert(self.carrying, activity.gives)
+			table.insert(outcome, "you now carry " .. activity.gives)
+		end
+		if activity.done then
+			task.spawn(activity.done, self, thing)
+		end
+		local text = "You finished: " .. string.gsub(activityName, "_", " ") .. " at " .. thing.name
+		if activity.shared and #with > 0 then
+			text ..= ", together with " .. table.concat(with, " and ")
+		end
+		if #outcome > 0 then
+			text ..= " (" .. table.concat(outcome, ", ") .. ")"
+		end
+		self:notice(text .. ".", { turn = true, about = with[1] })
+	end)
+	return { started = activityName, takes_seconds = seconds }
 end
 
 function Character:_has(item: string): number?
@@ -632,113 +878,188 @@ function Character:_actions(custom: { any }?)
 				{ name = "activity", type = "string" },
 			},
 			run = function(thingId, activityName)
-				local thing = world.things[thingId]
-				if not thing then
-					error("there is no thing called " .. tostring(thingId), 0)
+				return self_:_use(thingId, activityName)
+			end,
+		},
+		{
+			name = "join",
+			description = "Join a player in the shared activity they are doing right now (see what they are doing in people_nearby).",
+			params = { { name = "person", type = "string" } },
+			run = function(person)
+				local name = world:_resolve(person)
+				local other = name and world.people[name]
+				if not other then
+					error("you cannot see anyone called " .. tostring(person), 0)
 				end
-				local activity = thing.activities[activityName]
-				if not activity then
-					local names = {}
-					for name in thing.activities do
-						table.insert(names, name)
-					end
-					table.sort(names)
-					error(thingId .. " has no activity " .. tostring(activityName) .. ". It has: " .. table.concat(names, ", "), 0)
+				local at = other.getPosition()
+				if not at or distance(at, self_:position()) > world.sight then
+					error(name .. " is too far away to see", 0)
 				end
-				if thing.usedBy and thing.usedBy ~= self_.name then
-					error(thing.usedBy .. " is using " .. thingId .. " right now", 0)
+				local doing = other.doing
+				if not doing then
+					error(name .. " is not doing anything you can join", 0)
 				end
-				if activity.needs and not self_:_has(activity.needs) then
-					error("you need " .. activity.needs .. " to do that", 0)
+				local thing = world.things[doing.thing]
+				local activity = thing and thing.activities[doing.activity]
+				if not activity or not activity.shared then
+					error(name .. " is doing something only one person can do", 0)
+				end
+				local result = self_:_use(doing.thing, doing.activity)
+				result.with = name
+				return result
+			end,
+		},
+		{
+			name = "follow",
+			description = "Walk along with someone wherever they go, for a while. Use it when someone asks you to come with them. Any other movement stops it.",
+			params = { { name = "person", type = "string" } },
+			run = function(person)
+				local name = world:_resolve(person)
+				local at = name and world:_positionOf(name)
+				if not name or not at or name == self_.name then
+					error("you cannot see anyone called " .. tostring(person), 0)
+				end
+				if distance(at, self_:position()) > world.sight then
+					error(name .. " is too far away to see", 0)
 				end
 				local token = self_:_interrupt()
-				local seconds = activity.seconds or 5
-				thing.usedBy = self_.name
-				self_._using = thing
+				self_._following = name
+				self_:setStatus("walking with " .. name)
+				world:_emit({ type = "follow", character = self_.name, person = name, on = true })
 				task.spawn(function()
-					if distance(thing.position, self_:position()) > 6 then
-						if not self_:_walk(token, thing.position, "walking to " .. thing.name) then
-							if self_._task == token then
-								thing.usedBy = nil
-								self_._using = nil
-								self_:notice("You could not reach " .. thingId .. ".", { turn = true })
-							end
+					local started = os.clock()
+					local lastPlace = world:placeAt(at)
+					local settledPlace, settledAt = nil, 0
+					while self_._task == token and os.clock() - started < world.followSeconds do
+						local goal = world:_positionOf(name)
+						if not goal then
+							break
+						end
+						local here = self_:position()
+						local gap = distance(goal, here)
+						if gap > world.sight * 1.5 then
+							self_._following = nil
+							self_:setStatus(nil)
+							world:_emit({ type = "follow", character = self_.name, person = name, on = false })
+							self_:notice("You lost sight of " .. name .. ".", { about = name, turn = true })
 							return
 						end
-					end
-					if self_.body.face then
-						pcall(self_.body.face, self_.body, thing.position)
-					end
-					self_:setStatus(activity.status or string.gsub(activityName, "_", " "))
-					if activity.emote and self_.body.emote then
-						pcall(self_.body.emote, self_.body, activity.emote)
-					end
-					task.wait(seconds)
-					if self_._task ~= token then
-						return
-					end
-					thing.usedBy = nil
-					self_._using = nil
-					self_:setStatus(nil)
-					local outcome = {}
-					if activity.needs then
-						local index = self_:_has(activity.needs)
-						if index then
-							table.remove(self_.carrying, index)
+						if gap > 7 then
+							local offset = here - goal
+							local target = goal + offset.Unit * 4
+							if self_.body.walkToward and gap < 40 then
+								self_.body:walkToward(target)
+								task.wait(0.4)
+							else
+								self_.body:moveTo(target)
+							end
+						else
+							task.wait(0.4)
+						end
+						-- Tell the follower once they have arrived somewhere together.
+						local place = world:placeAt(goal)
+						if place and place ~= lastPlace and gap <= 12 then
+							if settledPlace ~= place then
+								settledPlace, settledAt = place, os.clock()
+							elseif os.clock() - settledAt > 2 then
+								lastPlace = place
+								self_:notice(string.format("You and %s arrived at %s together.", name, place), { about = name, turn = true })
+							end
 						end
 					end
-					for need, change in activity.effects or {} do
-						if self_.needs[need] then
-							self_.needs[need] = math.clamp(self_.needs[need] + change, 0, 100)
-							table.insert(outcome, need .. " is now " .. math.floor(self_.needs[need]))
-						end
+					if self_._task == token then
+						self_._following = nil
+						self_:setStatus(nil)
+						world:_emit({ type = "follow", character = self_.name, person = name, on = false })
+						self_:notice("You stopped walking with " .. name .. ".", { about = name, turn = true })
 					end
-					if activity.gives then
-						table.insert(self_.carrying, activity.gives)
-						table.insert(outcome, "you now carry " .. activity.gives)
-					end
-					if activity.done then
-						task.spawn(activity.done, self_, thing)
-					end
-					local text = "You finished: " .. string.gsub(activityName, "_", " ") .. " at " .. thing.name
-					if #outcome > 0 then
-						text ..= " (" .. table.concat(outcome, ", ") .. ")"
-					end
-					self_:notice(text .. ".", { turn = true })
 				end)
-				return { started = activityName, takes_seconds = seconds }
+				return { following = name, for_seconds = world.followSeconds }
+			end,
+		},
+		{
+			name = "invite",
+			description = "Invite a player to do a shared activity with you. You go and start it at once; they can join you there.",
+			params = {
+				{ name = "person", type = "string" },
+				{ name = "thing", type = "string" },
+				{ name = "activity", type = "string" },
+			},
+			run = function(person, thingId, activityName)
+				local name = world:_resolve(person)
+				if not name or not world.people[name] then
+					error("you cannot see a player called " .. tostring(person), 0)
+				end
+				local thing = world.things[thingId]
+				local activity = thing and thing.activities[activityName]
+				if not activity then
+					error("there is no activity " .. tostring(activityName) .. " at " .. tostring(thingId), 0)
+				end
+				if not activity.shared then
+					error(activityName .. " is not something you can do together", 0)
+				end
+				local result = self_:_use(thingId, activityName)
+				world:_emit({ type = "invite", from = self_.name, to = name, thing = thingId, activity = activityName, place = thing.place, text = activityText(thing, activityName) })
+				result.invited = name
+				return result
 			end,
 		},
 		{
 			name = "give",
-			description = "Give something you are carrying to someone next to you.",
+			description = "Give something you are carrying to someone. If they are not next to you, you walk over first.",
 			params = {
 				{ name = "item", type = "string" },
 				{ name = "to", type = "string" },
 			},
 			run = function(item, to)
-				local index = self_:_has(item)
-				if not index then
+				if not self_:_has(item) then
 					error("you are not carrying " .. tostring(item), 0)
 				end
 				local name = world:_resolve(to)
 				local at = name and world:_positionOf(name)
-				if not name or not at then
+				if not name or not at or name == self_.name then
 					error("you cannot see anyone called " .. tostring(to), 0)
 				end
-				if distance(at, self_:position()) > 12 then
-					error(name .. " is too far away. Use approach first.", 0)
+				if distance(at, self_:position()) > world.sight then
+					error(name .. " is too far away to see", 0)
 				end
-				table.remove(self_.carrying, index)
-				local other = world.characters[name]
-				if other then
-					table.insert(other.carrying, item)
-					other:notice(self_.name .. " gave you " .. item .. ".", { about = self_.name, urgent = true })
-				else
-					table.insert(world.people[name].carrying, item)
+				local function handOver(): boolean
+					local index = self_:_has(item)
+					local now = world:_positionOf(name)
+					if not index or not now or distance(now, self_:position()) > 12 then
+						return false
+					end
+					table.remove(self_.carrying, index)
+					local other = world.characters[name]
+					if other then
+						table.insert(other.carrying, item)
+						other:notice(self_.name .. " gave you " .. item .. ".", { about = self_.name, urgent = true })
+					elseif world.people[name] then
+						table.insert(world.people[name].carrying, item)
+					end
+					world:_emit({ type = "give", from = self_.name, to = name, item = item })
+					return true
 				end
-				world:_emit({ type = "give", from = self_.name, to = name, item = item })
-				return { gave = item, to = name }
+				if distance(at, self_:position()) <= 12 then
+					handOver()
+					return { gave = item, to = name }
+				end
+				local token = self_:_interrupt()
+				task.spawn(function()
+					local goal = world:_positionOf(name) or at
+					local offset = self_:position() - goal
+					if offset.Magnitude > 0.1 then
+						goal = goal + offset.Unit * 4
+					end
+					if self_:_walk(token, goal, "taking " .. item .. " to " .. name) then
+						if handOver() then
+							self_:notice("You walked over and gave " .. item .. " to " .. name .. ".", { about = name, turn = true })
+						else
+							self_:notice("You walked over but could not give " .. item .. " to " .. name .. ".", { about = name, turn = true })
+						end
+					end
+				end)
+				return { walking_to = name, will_give = item }
 			end,
 		},
 		{
@@ -922,10 +1243,14 @@ function World:_runTurn(character: any)
 		self:_emit({ type = "thinking", character = character.name, on = false })
 		self:_emit({ type = "turn", character = character.name, result = result })
 		if not result.ok then
-			warn("[WSI.World] " .. character.name .. " turn failed: " .. tostring(result.error))
-			character:_wakeIn(math.max(20, self.idleSeconds))
+			-- Retry soon: most failures are a vendor hiccup. Back off when they repeat.
+			character._failures += 1
+			local wait = math.min(self.retrySeconds * 3 ^ (character._failures - 1), math.max(self.idleSeconds, self.retrySeconds))
+			warn(string.format("[WSI.World] %s turn failed (%d in a row), retrying in %.1fs: %s", character.name, character._failures, wait, tostring(result.error)))
+			character:_wakeIn(wait)
 			return
 		end
+		character._failures = 0
 		if #character._inbox > 0 then
 			character:_wakeIn(1)
 		else
@@ -940,6 +1265,10 @@ end
 
 function World:_tick(dt: number)
 	local now = os.clock()
+	-- An empty world spends nothing: no needs falling, no turns.
+	if self.pauseWhenEmpty and next(self.people) == nil then
+		return
+	end
 	for _, name in self.characterOrder do
 		local character = self.characters[name]
 		if not character or not character.agent then
